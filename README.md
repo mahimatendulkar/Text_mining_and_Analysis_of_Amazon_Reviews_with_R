@@ -1,4 +1,4 @@
-# Analysis of Sentiments from Amazon Reviews
+# Sentiment Analysis of Amazon Reviews
 Data
 The data used for this project is available at : https://nijianmo.github.io/amazon/index.html
 
