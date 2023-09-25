@@ -1,0 +1,492 @@
+---
+title: "Text Analytics"
+output: html_document
+date: "2023-05-15"
+---
+
+```{r setup, include=FALSE}
+#Setup
+knitr::opts_chunk$set(echo = TRUE)
+library(jsonlite)
+library(textclean)
+library(data.table)
+library(tokenizers)
+library(tidyverse)
+library(tidytext)
+library(dplyr)
+library(qdap)
+library(qdapRegex)
+library(hcandersenr)
+library(hunspell)
+library(ggplot2)
+library(ggrepel)
+library(word2vec)
+library(uwot)
+library(janeaustenr)
+library(sentimentr)
+library(lexicon)
+library(textdata)
+library(tokenizers)
+library(topicmodels)
+library(tm)
+library(textstem)
+library(scales)
+library(syuzhet)
+library(sos)
+library(topicmodels)
+library(slam)
+library(wordcloud)
+library(gridExtra)
+library(caret)
+library(splitstackshape)
+```
+
+## 1. Data Read
+```{r,warning=FALSE,results='hide'}
+json_file <- "Luxury_Beauty_5.json.gz"
+json_data <- stream_in(gzfile(json_file))
+beauty.data <- data.table(json_data)
+```
+
+## 2. Data Cleaning
+```{r ,warning=FALSE}
+
+# Remove duplicates
+beauty.data <- distinct(beauty.data)
+
+# Handle HTML tags
+beauty.data$text_clean <- str_remove_all(beauty.data$reviewText, "<.*?>")
+
+# Separate URLs into a new column
+beauty.data <- beauty.data %>% 
+  mutate(url = str_extract(text_clean, "(?i)https?://[[:graph:]]+"))
+
+beauty.data$text_clean <- str_remove_all(beauty.data$text_clean, "(?i)https?://[[:graph:]]+")
+
+# Replace emoji
+#beauty.data$text_clean <- gsub(":\\)", "smiley face", beauty.data$text_clean)
+#beauty.data$text_clean <- replace_emoticon(beauty.data$text_clean)
+#beauty.data$text_clean <- replace_emoticon(beauty.data$text_clean, replacement == "")
+
+# Replace slang
+beauty.data$text_clean <- replace_contraction(beauty.data$text_clean)
+
+# Replace number
+beauty.data$text_clean <- replace_number(beauty.data$text_clean)
+
+# Replace % with percentage
+beauty.data$text_clean <- str_replace_all(beauty.data$text_clean, "%", "percent")
+
+# Replace date
+beauty.data$text_clean <- replace_date(beauty.data$text_clean)
+
+# Remove special characters
+beauty.data$text_clean <- str_replace_all(beauty.data$text_clean, "[^[:alnum:]\\s]", "")
+
+# remove extra spaces
+beauty.data$text_clean <- str_squish(beauty.data$text_clean)
+
+# lowercase
+beauty.data$text_clean <- tolower(beauty.data$text_clean)
+
+#Replace internet Slang
+beauty.data$text_clean <- replace_internet_slang(beauty.data$text_clean)
+
+```
+
+### 2.1 Tokenization
+```{r,warning=FALSE}
+# Select columns
+beauty.data.cleaned <- beauty.data %>% select(overall, reviewerID, asin, text_clean)
+
+# Define a regular expression pattern to match hyphenated words
+hyphen_pattern <- "[[:alnum:]]+(?:[-'][[:alnum:]]+)*"
+
+# Define a custom tokenization function using the hyphen_pattern
+custom_tokenize <- function(x) {
+  str_extract_all(x, hyphen_pattern)
+}
+
+
+tokenized_df = beauty.data.cleaned %>%
+    unnest_tokens(text_clean,output=word_token,token=custom_tokenize)
+
+```
+
+### 2.2 Lemmatization
+```{r,warning=FALSE}
+
+
+lemmatized_df <- tokenized_df %>%
+  mutate(word_token = lemmatize_words(word_token)) %>%  unnest(word_token) 
+
+
+```
+### 2.3 Remove Stop words
+```{r,warning=FALSE,}
+norm_df =anti_join(lemmatized_df,stop_words,by=c("word_token"="word"))
+
+```
+
+## 3. Bag-of-words analysis
+```{r,warning=FALSE}
+
+plot_data <- norm_df %>%
+  group_by(overall, word_token) %>%
+  count() %>%
+  arrange(overall, desc(n)) %>%
+  group_by(overall) %>%
+  slice_max(n, n = 10)
+
+ggplot(plot_data, aes(y = reorder_within(word_token, n, overall), x = n,colour=)) +
+  geom_bar(stat = 'identity') + 
+  facet_wrap(~ overall, nrow = 2, ncol = 3, scales = "free_y") +
+  labs(title = 'Top 10 frequent words for Each Rating', y= 'word_tokens', x='frequency') 
+
+#look at most important words for each rating
+norm_df_counts <- norm_df %>%
+count(overall,word_token, sort = TRUE) %>%
+ungroup() %>%
+rename(count=n)
+
+norm_tfidf <- norm_df_counts %>%
+bind_tf_idf(word_token, overall, count)
+
+# Group the norm_tfidf dataframe by overall
+norm_tfidf_grouped <- norm_tfidf %>%
+  group_by(overall) %>%
+  # Arrange the rows within each group by decreasing tf_idf values
+  arrange(desc(tf_idf)) %>%
+  # Select the top 5 rows within each group
+  slice_head(n = 5) %>%
+  # Unnest the word_token column
+  unnest(word_token) %>%
+  # Create a row number variable within each group
+  group_by(overall) %>%
+  mutate(row_num = row_number()) %>%
+  # Spread the top 5 words into separate columns, with row_num as the ID variable
+  pivot_wider(id_cols = overall, names_from = row_num, values_from = word_token, names_prefix = "word_")
+
+# Select only the num and word columns
+top_5_words <- norm_tfidf_grouped %>%
+  select(overall, starts_with("word_"))
+
+# Rename the columns to remove the "word_" prefix
+colnames(top_5_words) <- paste0("top_", 0:5)
+colnames(top_5_words)[1] <- "Rating"
+# Print the resulting dataframe
+head(top_5_words)
+
+norm_dtm_counts <- norm_tfidf %>% cast_dtm(overall,word_token,count)
+as.matrix((norm_dtm_counts[1:5,1:5]))
+
+norm_dtm_tfidf <- norm_tfidf %>% cast_dtm(overall,word_token,tf_idf)
+as.matrix((norm_dtm_tfidf[1:5,1:5]))
+
+norm_dtm_counts
+
+norm_dtm_tfidf
+
+norm_dtm_counts_sparse <- removeSparseTerms(norm_dtm_counts,0.5)
+norm_dtm_tfidf_sparse <- removeSparseTerms(norm_dtm_tfidf,0.5)
+
+norm_dtm_counts_sparse
+
+as.matrix((norm_dtm_counts_sparse[1:5,11:20]))
+
+
+#Supervised linear regression
+prop.table(table(beauty.data.cleaned$overall))
+
+set.seed(123)
+
+sample_size <- 2500  # Specify the desired sample size
+
+# Create sample of data
+#sample_beauty_data <- stratified(beauty.data.cleaned, group = "overall", size = 500)
+sample_beauty_data <- beauty.data.cleaned[sample(nrow(beauty.data.cleaned), sample_size), ] %>% select ("overall","text_clean")
+
+sample_beauty_data$doc = seq(1:nrow(sample_beauty_data))
+sample_beauty_data$overall <- as.factor(sample_beauty_data$overall)
+
+prop.table(table(sample_beauty_data$overall))
+
+#Tokenize
+r_y = sample_beauty_data %>%
+    unnest_tokens(text_clean,output=word_token,token="words",strip_punct=F)
+r_y1=anti_join(r_y,stop_words,by=c("word_token"="word"))
+head(r_y1)
+
+
+# Using term counts
+dtm_count_a <- r_y1 %>% count(doc,word_token) %>% cast_dtm(doc,word_token,n)
+dtm_count_a = removeSparseTerms(dtm_count_a,0.99)
+dtm_count_a
+
+X <- as.data.frame(as.matrix(dtm_count_a))
+X$doc <- as.integer(dtm_count_a$dimnames$Docs)
+X <- left_join(X,sample_beauty_data,by=c("doc"))
+
+X_count <- select(X,-c("doc","text_clean","overall")) %>% select_if(is.numeric)
+Y_count <- select(X,c("overall"))
+
+dfX <- X_count 
+dfY <- Y_count
+
+#GLMNetmodel
+
+GLMNetmodel <- function (dfX,dfY)
+  {
+  set.seed(123)
+  idx <- sample(1:nrow(dfX), size = 0.7 * nrow(dfX), replace = FALSE)
+  glm_model <- train(x=dfX[idx,], y =dfY[idx,],method = "glmnet" )
+  pred <- predict(glm_model, dfX[-idx,])
+  return(confusionMatrix(pred, dfY[-idx,]))
+}
+
+print("GLMNet on DTM counts")
+GLMNetmodel(X_count,Y_count)
+
+```
+
+## 4. Polarity Sentiment
+
+### 4.1 Using Afinn lexicon
+```{r,warning=FALSE}
+
+afinn_dictionary <- tidytext::get_sentiments("afinn")
+
+afinn_df <- left_join(norm_df,afinn_dictionary,by = c("word_token"="word"))
+
+afinn_df <- afinn_df %>% 
+  rename("afinn_sentiment" = "value") %>% 
+  drop_na(afinn_sentiment) %>%
+  group_by(asin) %>% 
+  summarise (avg_rating = mean(overall), mean_afinn_sentiment = mean(afinn_sentiment)) %>%
+  mutate(rescaled_afinn_mean = scales::rescale(mean_afinn_sentiment, to = c(1, 5), from = c(-5, 5)))
+
+
+# Density Plot for re scaled sentiment
+plot(density(afinn_df$rescaled_afinn_mean))
+
+#Correlation between average rating for product and sentiment polarity
+afinn_cor <- cor(afinn_df$rescaled_afinn_mean, afinn_df$avg_rating)
+afinn_cor
+
+# Perform linear regression
+lm_model1 <- lm(rescaled_afinn_mean ~ avg_rating, data = afinn_df)
+
+# Print the regression coefficients
+print(summary(lm_model1))
+
+# Calculate R-squared
+r_squared_afinn <- summary(lm_model1)$r.squared
+print(paste("R-squared value for Afinn:", round(r_squared_afinn, 4)))
+
+
+```
+
+### 4.2 Using sentimentR lexicon
+```{r,warning=FALSE}
+
+score <- sentiment(get_sentences(beauty.data.cleaned$text_clean))
+beauty.data.cleaned$polaritysentiment <- score$sentiment
+
+sentimentr_df <- beauty.data.cleaned %>% 
+  group_by(asin) %>% 
+  mutate(avg_rating = mean(overall), mean_sentimentr = mean(polaritysentiment)) %>%
+  select(asin,avg_rating,mean_sentimentr) %>% distinct() %>%
+  mutate(rescaled_sentimentr_mean = scales::rescale(mean_sentimentr, to = c(1,5), from = c(-1,1)))
+
+# Density Plot for re scaled sentiment
+plot(density(sentimentr_df$rescaled_sentimentr_mean))
+
+#Correlation between average rating for product and sentiment polarity
+sentimentr_cor <- cor(sentimentr_df$rescaled_sentimentr_mean, sentimentr_df$avg_rating)
+sentimentr_cor
+
+# Perform linear regression
+lm_model2 <- lm(rescaled_sentimentr_mean ~ avg_rating, data = sentimentr_df)
+
+# Print the regression coefficients
+print(summary(lm_model2))
+
+# Calculate R-squared
+r_squared_sentimentr <- summary(lm_model2)$r.squared
+print(paste("R-squared vlaue for Sentimentr:", round(r_squared_sentimentr, 4)))
+
+```
+
+### 4.3 Using VADER lexicon
+```{r,warning=FALSE}
+vader_df <- norm_df
+
+# Calculate sentiment scores using VADER
+vader_sentiment <- get_sentiment(norm_df$word_token, method = "syuzhet")
+
+vader_df <- cbind(vader_df, sentiment = vader_sentiment)
+
+vader_df <- vader_df %>% 
+  rename("vader_sentiment" = "sentiment") %>% 
+  group_by(asin) %>% 
+  summarise (avg_rating = mean(overall), mean_vader_sentiment = mean(vader_sentiment)) %>%
+  mutate(rescaled_vader_mean = scales::rescale(mean_vader_sentiment, to = c(1, 5), from = c(-5, 5)))
+
+
+# Density Plot for re scaled sentiment
+plot(density(vader_df$rescaled_vader_mean))
+
+#Correlation between average rating for product and sentiment polarity
+vader_cor <- cor(vader_df$rescaled_vader_mean, vader_df$avg_rating)
+vader_cor
+
+# Perform linear regression
+lm_model3 <- lm(rescaled_vader_mean ~ avg_rating, data = vader_df)
+
+# Print the regression coefficients
+print(summary(lm_model3))
+
+# Calculate R-squared
+r_squared_vader <- summary(lm_model3)$r.squared
+print(paste("R-squared value for vader:", round(r_squared_vader, 4)))
+
+
+```
+
+
+```{r,warning=FALSE}
+#Comparison Plot
+
+a <- ggplot(afinn_df, aes(y=rescaled_afinn_mean, x=avg_rating)) + geom_point() + labs(x="Average Rating of Products", y="Rescaled Average Polarity Sentiment") + labs(caption="Using Afinn") + theme(plot.caption = element_text(size=10,hjust=0.5)) + geom_smooth(method=lm)
+
+b <- ggplot(sentimentr_df, aes(y=rescaled_sentimentr_mean, x=avg_rating)) + geom_point() + labs(x="Average Rating of Products", y="Rescaled Average Polarity Sentiment") + labs(caption="Using SentimentR") + theme(plot.caption = element_text(size=10,hjust=0.5)) + geom_smooth(method=lm)
+
+c <- ggplot(vader_df, aes(y=rescaled_vader_mean, x=avg_rating)) + geom_point() + labs(x="Average Rating of Products", y="Rescaled Average Polarity Sentiment") + labs(caption="Using Vader") + theme(plot.caption = element_text(size=10,hjust=0.5)) + geom_smooth(method=lm)
+
+grid.arrange(a,b,c, ncol=3, top = 'The shaded area shows the 95% CI for the best-fitting regression line')
+
+
+```
+
+
+## 5. Topic Modelling
+
+```{r,warning=FALSE}
+#assuming that dissatisfied customer give rating of 1-2.5 and satisfied customers give rating 2.5-5
+
+norm_dissatisfied <- norm_df %>%  filter(overall >= 1 & overall <= 3)
+norm_satisfied <- norm_df %>%  filter(overall > 3 & overall <= 5)
+
+
+
+dtm_satisfied <- norm_satisfied %>% count(asin,word_token) %>% cast_dtm(asin,word_token,n)
+dtm_dissatisfied <- norm_dissatisfied %>% count(asin,word_token) %>% cast_dtm(asin,word_token,n)
+
+
+dtm_satisfied <- removeSparseTerms(dtm_satisfied,0.5)
+dtm_dissatisfied <- removeSparseTerms(dtm_dissatisfied,0.7)
+
+dtm_satisfied
+dtm_dissatisfied
+```
+
+```{r,warning=FALSE}
+
+# Remove all zero rows from the dtm
+dtm_dissatisfied <- dtm_dissatisfied[row_sums(as.matrix(dtm_dissatisfied)) > 0, ]
+dtm_satisfied <- dtm_satisfied[row_sums(as.matrix(dtm_satisfied)) > 0, ]
+
+# Now apply LDA
+my_topic_dissatisfied <- LDA(dtm_dissatisfied, k = 6, method = "Gibbs")
+my_topic_satisfied <- LDA(dtm_satisfied, k = 6, method = "Gibbs")
+
+topics1 <- tidy(my_topic_dissatisfied, matrix = "beta")
+topics2 <- tidy(my_topic_satisfied, matrix = "beta")
+
+top_terms1 <- topics1 %>%
+group_by(topic) %>%
+slice_max(beta, n = 15) %>%
+ungroup() %>%
+arrange(topic, desc(beta))
+
+top_terms2 <- topics2 %>%
+group_by(topic) %>%
+slice_max(beta, n = 15) %>%
+ungroup() %>%
+arrange(topic, desc(beta))
+
+# Plot
+top_terms1 %>%
+mutate(term = reorder_within(term, beta, topic)) %>%
+ggplot(aes(beta, term, fill = factor(topic))) +
+geom_col(show.legend = FALSE) +
+facet_wrap(~ topic, scales = "free") +
+scale_y_reordered() + labs(title ="Topics from reviews by dissatisfied customer")
+
+top_terms2 %>%
+mutate(term = reorder_within(term, beta, topic)) %>%
+ggplot(aes(beta, term, fill = factor(topic))) +
+geom_col(show.legend = FALSE) +
+facet_wrap(~ topic, scales = "free") +
+scale_y_reordered() +labs(title ="Topics from reviews by satisfied customer")
+
+# dissatisfied
+t1 = top_terms1$term[1:15]
+t1
+
+# Satisfied
+t2 = top_terms2$term[1:15]
+t2
+
+```
+
+### 5.1 Create word cloud and analyse perplexity scores
+
+```{r,warning=FALSE}
+#Create word cloud for both dissatisfied and satisfied customer reviews
+terms_dis <- terms(my_topic_dissatisfied, 5)
+wordcloud(terms_dis, scale = c(5, 0.4), min.freq = 1)
+
+terms_sat <- terms(my_topic_satisfied, 5)
+wordcloud(terms_sat, scale = c(5, 0.4), min.freq = 1)
+
+
+#Evaluate the Number of Topics
+
+#dissatisfied
+perplexity(my_topic_dissatisfied,dtm_dissatisfied)
+
+set.seed(12345)
+topics <- c(2:7)
+perplexity_df_dissatisfied <- data.frame(perp_value=numeric())
+for (i in topics){
+  fitted <- LDA(dtm_dissatisfied, k = i, method = "Gibbs")
+  perplexity_df_dissatisfied[i,1] <- perplexity(fitted,dtm_dissatisfied)
+}
+
+
+#Satisfied
+
+perplexity(my_topic_satisfied,dtm_satisfied)
+
+set.seed(12345)
+topics <- c(2:7)
+perplexity_df_satisfied <- data.frame(perp_value=numeric())
+for (i in topics){
+  fitted <- LDA(dtm_satisfied, k = i, method = "Gibbs")
+  perplexity_df_satisfied[i,1] <- perplexity(fitted,dtm_satisfied)
+}
+
+#plot the perplexity scores
+
+g <- ggplot(data=perplexity_df_dissatisfied, aes(x= as.numeric(row.names(perplexity_df_dissatisfied)))) + labs(y="Perplexity",x="Number of topics") + ggtitle("Perplexity for dissatisfied reviews")
+g <- g + geom_line(aes(y=perp_value), colour="green")
+
+
+h <- ggplot(data=perplexity_df_satisfied, aes(x= as.numeric(row.names(perplexity_df_satisfied)))) + labs(y="Perplexity",x="Number of topics") + ggtitle("Perplexity for satisfied reviews")
+h <- h + geom_line(aes(y=perp_value), colour="green")
+
+
+grid.arrange(g, h,nrow=1)
+
+```
