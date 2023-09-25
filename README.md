@@ -1,4 +1,4 @@
-# text_mining_analysis_of_amazon_reviews
+# Analysis of Sentiments from Amazon Reviews
 Data
 The data used for this project is available at : https://nijianmo.github.io/amazon/index.html
 
